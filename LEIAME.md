@@ -112,6 +112,29 @@ dentro de `saida`.
 
 ---
 
+## Partitura da voz e do baixo (Colab)
+
+No `KaraokeSep_Colab.ipynb`, ligue `PARTITURA = "voz_e_baixo"` na primeira
+célula e rode também a célula **Partitura**, logo abaixo. Ela transcreve a voz e
+o baixo de cada música e baixa o `stems.zip` já com isto dentro de cada pasta:
+
+```
+saida/<música>/partituras/
+    <faixa>.musicxml    a partitura (abre no MuseScore)
+    <faixa>.pdf         para imprimir
+    <faixa>.mid         as notas, com o tempo real do áudio
+    partitura.json      batidas, compasso, tonalidade, confiança por compasso
+```
+
+O ritmo segue as batidas detectadas na música, não um BPM fixo. A confiança por
+compasso compara o que foi escrito com o que se ouve: é um alarme para os
+trechos que precisam de correção, não garantia de acerto.
+
+Limites desta versão: só voz e baixo, uma nota por vez, sem tercinas. Piano,
+guitarra e bateria ficam para depois. Ainda não aparece no modo festa.
+
+---
+
 ## O programa com abas
 
 `rodar.bat`, para o que o modo festa não cobre:
