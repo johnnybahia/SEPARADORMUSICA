@@ -137,6 +137,94 @@ def _e_fonte(haste: str, pasta_nome: str) -> bool:
     return h == pasta_nome.lower().strip()
 
 
+# --------------------------------------------------------------------------- #
+#  Partituras
+#
+#  Geradas no Colab, dentro de saida/<musica>/partituras/. O player so le:
+#    partitura.json        batidas, compasso, tonalidade, confianca por compasso
+#    <faixa>.svg           a partitura numa pagina longa, para rolar na tela
+#    <faixa>.timemap.json  quais notas soam em cada batida (ids do SVG)
+#    <faixa>.pdf/.musicxml/.mid   para baixar
+# --------------------------------------------------------------------------- #
+FORMATO_PARTITURA = 2
+TIPOS_PARTITURA = ("pdf", "musicxml", "mid")
+
+
+def _ler_partitura(pasta: Path) -> dict | None:
+    jp = pasta / "partituras" / "partitura.json"
+    if not jp.is_file():
+        return None
+    try:
+        d = json.loads(jp.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.debug("partitura.json ilegivel em %s: %s", pasta.name, e)
+        return None
+    if not isinstance(d, dict) or int(d.get("versao", 0)) != FORMATO_PARTITURA:
+        return None
+    return d
+
+
+def _arquivos_existentes(pasta: Path, arquivos: dict) -> dict:
+    """So aceita nome simples (sem barra) e que exista de fato."""
+    base = pasta / "partituras"
+    return {k: v for k, v in (arquivos or {}).items()
+            if isinstance(v, str) and v == Path(v).name and (base / v).is_file()}
+
+
+def _resumo_partitura(pasta: Path) -> dict | None:
+    """O que a fila precisa saber. As listas grandes (batidas, confianca por
+    compasso) ficam para /api/partitura, so quando a aba abre."""
+    d = _ler_partitura(pasta)
+    if not d:
+        return None
+    stems = {}
+    for chave, s in (d.get("stems") or {}).items():
+        arqs = _arquivos_existentes(pasta, s.get("arquivos"))
+        if not arqs:
+            continue
+        stems[chave] = {
+            "nome": s.get("nome") or chave, "tonalidade": s.get("tonalidade", ""),
+            "notas": s.get("notas", 0), "confianca": s.get("confianca", 0),
+            "aviso": s.get("aviso", ""), "hash": s.get("hash", ""),
+            "tela": "svg" in arqs and "timemap" in arqs,
+            "arquivos": arqs,
+        }
+    if not stems:
+        return None
+    return {"bpm": d.get("bpm"), "compasso": d.get("compasso", [4, 4]),
+            "fonte_batidas": d.get("fonte_batidas", ""), "stems": stems}
+
+
+def partitura_completa(titulo: str) -> dict | None:
+    """partitura.json inteiro, para o titulo de uma musica que esta na fila."""
+    pasta = next((PASTA_SAIDA / m["titulo"] for m in varrer()
+                  if m["titulo"] == titulo), None)
+    return _ler_partitura(pasta) if pasta else None
+
+
+def zip_partituras(titulo: str, tipo: str = "pdf") -> bytes | None:
+    """Zip com a partitura de cada faixa no formato pedido."""
+    import io
+    import zipfile
+    if tipo not in TIPOS_PARTITURA:
+        return None
+    pasta = next((PASTA_SAIDA / m["titulo"] for m in varrer()
+                  if m["titulo"] == titulo), None)
+    d = _ler_partitura(pasta) if pasta else None
+    if not d:
+        return None
+    buf = io.BytesIO()
+    n = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for chave, s in (d.get("stems") or {}).items():
+            nome = _arquivos_existentes(pasta, s.get("arquivos")).get(tipo)
+            if nome:
+                z.write(pasta / "partituras" / nome,
+                        f"{titulo} - {s.get('nome') or chave}.{tipo}")
+                n += 1
+    return buf.getvalue() if n else None
+
+
 def varrer() -> list[dict]:
     if not PASTA_SAIDA.exists():
         return []
@@ -177,7 +265,8 @@ def varrer() -> list[dict]:
                 faixas.pop(pai, None)
 
         item = {"titulo": pasta.name, "temFaixas": bool(faixas),
-                "canais": [], "unico": "", "letra": []}
+                "canais": [], "unico": "", "letra": [],
+                "partitura": _resumo_partitura(pasta)}
         if faixas:
             def ordenar(k):
                 return (ORDEM.index(k) if k in ORDEM else 99, k)
@@ -343,6 +432,12 @@ def _laco():
             with _trava:
                 _estado["atual"] = None
             _tarefas.task_done()
+
+
+def _ocupado() -> bool:
+    """Ha separacao rodando ou na fila? A atualizacao reinicia o servidor."""
+    with _trava:
+        return bool(_estado["atual"] or _estado["espera"])
 
 
 def _garantir_trabalhador():
@@ -569,6 +664,15 @@ _porta = 0
 
 
 class _Manipulador(http.server.SimpleHTTPRequestHandler):
+    # No Windows o tipo de .js vem do registro e as vezes sai text/plain, o
+    # que o navegador recusa para service worker. Fixa os que importam.
+    extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
+                      ".js": "text/javascript",
+                      ".webmanifest": "application/manifest+json",
+                      ".svg": "image/svg+xml",
+                      ".mid": "audio/midi",
+                      ".musicxml": "application/vnd.recordare.musicxml+xml"}
+
     # HTTP/1.1 mantem a conexao viva. Com 10 faixas, o limite de 6 conexoes
     # por host do navegador fazia as ultimas ficarem na fila e estourarem.
     protocol_version = "HTTP/1.1"
@@ -663,6 +767,35 @@ class _Manipulador(http.server.SimpleHTTPRequestHandler):
             if rota.startswith("/api/nomes"):
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 return self._json(sugerir_nomes(qs.get("titulo", [""])[0]))
+            if rota == "/api/versao":
+                from . import atualizar
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self._json(atualizar.verificar(forcar="forcar" in qs))
+            if rota == "/api/atualizacao":
+                from . import atualizar
+                return self._json(atualizar.estado())
+            if rota == "/api/partitura":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                d = partitura_completa(qs.get("titulo", [""])[0])
+                return self._json(d if d else {"erro": "sem partitura"},
+                                  200 if d else 404)
+            if rota == "/api/partitura_zip":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                titulo = qs.get("titulo", [""])[0]
+                tipo = qs.get("tipo", ["pdf"])[0]
+                corpo = zip_partituras(titulo, tipo)
+                if corpo is None:
+                    return self._json({"erro": "nada para baixar"}, 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Length", str(len(corpo)))
+                self.send_header("Content-Disposition",
+                                 "attachment; filename*=UTF-8''"
+                                 + urllib.parse.quote(f"{titulo} - partituras {tipo}.zip"))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(corpo)
+                return
             if rota.startswith("/api/mapa"):
                 from . import mapa as _mapa
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -681,7 +814,20 @@ class _Manipulador(http.server.SimpleHTTPRequestHandler):
             log.debug("Faixa de bytes falhou, mandando inteiro: %s", e)
         return super().do_GET()
 
+    def _origem_confiavel(self) -> bool:
+        """So aceita POST vindo da propria pagina. Sem isso, qualquer site
+        aberto no navegador poderia mandar POST para 127.0.0.1 e, por exemplo,
+        disparar uma atualizacao ou enfileirar separacoes. Confere o Host
+        (contra DNS rebinding) e, quando o navegador manda, o Origin."""
+        aceitos = {f"127.0.0.1:{_porta}", f"localhost:{_porta}"}
+        if (self.headers.get("Host") or "").lower() not in aceitos:
+            return False
+        origem = self.headers.get("Origin")
+        return origem is None or origem.lower() in {f"http://{h}" for h in aceitos}
+
     def do_POST(self):
+        if not self._origem_confiavel():
+            return self._json({"erro": "origem nao permitida"}, 403)
         rota = urllib.parse.urlparse(self.path).path
         tamanho = int(self.headers.get("Content-Length") or 0)
         corpo = self.rfile.read(tamanho) if tamanho else b""
@@ -692,6 +838,9 @@ class _Manipulador(http.server.SimpleHTTPRequestHandler):
                                              dados.get("modo", "padrao")))
             if rota == "/api/cancelar":
                 return self._json(cancelar())
+            if rota == "/api/atualizar":
+                from . import atualizar
+                return self._json(atualizar.iniciar(ocupado=_ocupado))
             if rota == "/api/separar_vozes":
                 d = json.loads(corpo or b"{}")
                 return self._json(enfileirar(d.get("titulo", ""), "vozes",
@@ -745,6 +894,11 @@ def endereco() -> str:
 def gerar(destino: Path | None = None) -> tuple[Path, list[dict]]:
     fila = varrer()
     destino = destino or (PASTA_SAIDA / "festa.html")
+    try:
+        from . import pwa
+        pwa.escrever(destino.parent)
+    except Exception as e:                    # instalar e extra; nunca derruba a festa
+        log.warning("Nao gravei os arquivos de instalacao: %s", e)
     destino.write_text(
         PAGINA.replace("__FILA__", json.dumps(fila, ensure_ascii=False))
               .replace("__MODOS__", json.dumps(_modos_com_tempo(),
@@ -758,6 +912,9 @@ PAGINA = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0d10">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icone-192.png">
 <title>Modo festa</title>
 <style>
   :root{
@@ -969,6 +1126,45 @@ PAGINA = r"""<!DOCTYPE html>
   body.cheia #fila,body.cheia #voz,body.cheia #espectro,body.cheia .dica{display:none}
   body.cheia #letra p{font-size:30px}
   body.cheia #letra p.atual{font-size:46px}
+
+  /* ---- partitura ---- */
+  #partitura{display:none;flex:1;flex-direction:column;min-height:0;gap:8px}
+  body.verPartitura #partitura{display:flex}
+  body.verPartitura #espectro,body.verPartitura #mapa,
+  body.verPartitura .dica,body.verPartitura #letra{display:none !important}
+  #partBarra{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+  #partChips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{background:#0f141a;border:1px solid var(--linha);color:var(--texto);
+        font:inherit;font-size:13px;font-weight:600;padding:6px 14px;
+        border-radius:99px;cursor:pointer}
+  .chip:hover{border-color:var(--quente)}
+  .chip.on{background:var(--quente);border-color:var(--quente);color:#1a0e02}
+  #partInfo{font-size:12px;color:var(--fraco);flex:1;min-width:160px}
+  .partCtl{font-size:11px;color:var(--fraco);display:flex;align-items:center;gap:6px}
+  .partCtl input{width:90px;accent-color:var(--frio)}
+  .partCtl .val{min-width:44px;font-variant-numeric:tabular-nums}
+  #partBaixar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  #partBaixar a{text-decoration:none;display:inline-block}
+  #partAviso{font-size:12px;line-height:1.4;color:var(--quente)}
+  #partAviso.ruim{color:var(--alerta)}
+  #partAviso:empty{display:none}
+  #partFolha{flex:1;min-height:0;overflow:auto;background:#fbfaf7;border-radius:8px;
+             border:1px solid var(--linha);user-select:none;position:relative}
+  #partSvg{padding:10px 14px}
+  #partSvg svg{display:block;margin:0 auto}
+  #partSvg g.note{cursor:pointer}
+  /* cabeca da nota e <use>: pinta por fill; haste e linha auxiliar, por color */
+  #partSvg g.note.tocando,#partSvg g.note.tocando *{color:#e8590c;fill:#e8590c}
+  #partSvg rect.confBaixa{fill:rgba(226,87,76,.20);pointer-events:none}
+  #partSvg rect.confMedia{fill:rgba(255,176,32,.20);pointer-events:none}
+  #partLetra{display:none;line-height:1.35}
+  #partLetra .atual{font-size:22px;font-weight:700;color:var(--quente);min-height:1.35em}
+  #partLetra .prox{font-size:15px;color:var(--fraco);min-height:1.35em}
+  .partMsg{padding:40px 20px;text-align:center;color:#6b6b6b;font-size:14px}
+  .verpart{background:none;border:1px solid var(--frio);color:var(--frio);
+           font:inherit;font-size:10px;padding:1px 6px;border-radius:4px;
+           margin-left:6px;cursor:pointer}
+  .verpart:hover{background:var(--frio);color:#06201e}
   :focus-visible{outline:2px solid var(--quente);outline-offset:2px}
   @media (max-width:900px){
     main{flex-direction:column}
@@ -981,6 +1177,10 @@ PAGINA = r"""<!DOCTYPE html>
 <header>
   <h1>Festa</h1>
   <div class="agora" id="agora">Escolha uma musica</div>
+  <button class="selo vivo" id="btInstalar" style="display:none;cursor:pointer;background:none"
+          title="Abre o modo festa numa janela propria, como um aplicativo">Instalar app</button>
+  <button class="selo vivo" id="btAtualizarApp" style="display:none;cursor:pointer;background:none"></button>
+  <span class="selo" id="seloVersao" title="Versao instalada">v —</span>
   <span class="selo" id="selo">—</span>
 </header>
 
@@ -1186,6 +1386,22 @@ PAGINA = r"""<!DOCTYPE html>
        instrumento. Quanto mais forte a cor, mais alto ele esta tocando.
        Clique para pular para aquele ponto.</p>
     <div id="letra" class="vazio">Sem letra sincronizada</div>
+    <div id="partitura">
+      <div id="partBarra">
+        <div id="partChips"></div>
+        <div id="partInfo"></div>
+        <label class="partCtl" title="Adianta ou atrasa o cursor da partitura em relacao ao som">Ajuste
+          <input type="range" id="partAjuste" min="-400" max="400" step="10" value="0">
+          <span class="val" id="partAjusteV">0 ms</span></label>
+        <label class="partCtl">Tamanho
+          <input type="range" id="partZoom" min="60" max="160" step="10" value="100">
+          <span class="val" id="partZoomV">100%</span></label>
+        <div id="partBaixar"></div>
+      </div>
+      <div id="partAviso"></div>
+      <div id="partLetra"><div class="atual">&nbsp;</div><div class="prox"></div></div>
+      <div id="partFolha"><div id="partSvg"></div></div>
+    </div>
   </section>
 
   <section id="voz">
@@ -1216,6 +1432,8 @@ PAGINA = r"""<!DOCTYPE html>
     </span>
     <button class="bt" id="btPontos">Pontuacao</button>
     <button class="bt on" id="btEspectro">Espectro</button>
+    <button class="bt" id="btPartitura" style="display:none"
+            title="Partitura da voz e do baixo, com cursor (tecla S)">Partitura</button>
     <button class="bt" id="btCheia">Tela cheia</button>
   </div>
   <div id="placar">
@@ -1457,10 +1675,16 @@ function montarCanais(m){
     d.className='canal'+(c.dados.voz?' ev':'');
     d.dataset.idx=i;
     d.innerHTML='<div class="topo"><span><i class="luz"></i>'+c.dados.nome
-      +'<button class="refazer" data-refaz="'+i+'">Refazer</button></span>'
+      +'<button class="refazer" data-refaz="'+i+'">Refazer</button>'
+      +(partDoItem(m)&&partDoItem(m).stems[c.dados.chave]&&partDoItem(m).stems[c.dados.chave].tela
+          ?'<button class="verpart" data-part="'+c.dados.chave+'">Partitura</button>':'')
+      +'</span>'
       +'<span class="db" id="db'+i+'">0 dB</span></div>'
       +'<input type="range" min="-60" max="12" step="1" value="0" data-vol="'+i+'">';
     cx.appendChild(d);
+  });
+  cx.querySelectorAll('[data-part]').forEach(b=>{
+    b.onclick=()=>abrirPartitura(b.dataset.part);
   });
   cx.querySelectorAll('[data-refaz]').forEach(b=>{
     b.onclick=async ()=>{
@@ -1805,6 +2029,7 @@ function carregar(i,tocarJa){
 
   if(m.temFaixas) montarComFaixas(m); else montarSemFaixas(m);
   montarCanais(m); montarBotoesVoz(); aplicarVoz(); montarLetra(m);
+  prepararPartitura(m);
   carregarMapa(m.temFaixas?m.titulo:null);
   if(m.temFaixas){
     aviso.textContent='Carregando '+m.canais.length+' faixas...';
@@ -1820,11 +2045,23 @@ let linhas=[], ultima=-1;
 function montarLetra(m){
   const cx=document.getElementById('letra'); linhas=[]; ultima=-1;
   if(!m.letra.length){ cx.className='vazio';
-    cx.textContent='Sem letra sincronizada para esta musica'; return; }
+    cx.textContent='Sem letra sincronizada para esta musica';
+    atualizarLetraPart(-1); return; }
   cx.className=''; cx.innerHTML='';
   m.letra.forEach(l=>{ const p=document.createElement('p');
     p.textContent=l.texto||'\u00a0'; p.onclick=()=>irPara(l.t);
     cx.appendChild(p); linhas.push({t:l.t,el:p}); });
+  atualizarLetraPart(-1);
+}
+/* a aba Partitura esconde a letra grande; esta faixa mantem a linha atual
+   e a proxima a vista de quem canta lendo a pauta */
+function atualizarLetraPart(k){
+  const cx=document.getElementById('partLetra');
+  if(!linhas.length){ cx.style.display='none'; return; }
+  cx.style.display='block';
+  const txt=i=>(i>=0&&i<linhas.length)?linhas[i].el.textContent.trim():'';
+  cx.children[0].textContent=txt(k)||'\u00a0';
+  cx.children[1].textContent=txt(k+1);
 }
 function atualizarLetra(t){
   if(!linhas.length) return;
@@ -1835,6 +2072,7 @@ function atualizarLetra(t){
   if(k>=0){ const cx=document.getElementById('letra');
             cx.scrollTop=linhas[k].el.offsetTop-cx.clientHeight*0.36; }
   ultima=k;
+  atualizarLetraPart(k);
 }
 
 /* ============ espectro e filtro ao vivo ============ */
@@ -1855,6 +2093,7 @@ function xParaHz(x){
 function desenhar(){
   requestAnimationFrame(desenhar);
   medir();
+  if(document.body.classList.contains('verPartitura')) atualizarPartitura();
   if(document.body.classList.contains('verMapa')) desenharMapa();
   if(!analisador) return;
   const n=analisador.frequencyBinCount, dados=new Uint8Array(n);
@@ -2257,12 +2496,394 @@ addEventListener('keydown',e=>{
   if(e.key==='p') carregar(idx-1,true);
   if(e.key==='f') document.getElementById('btCheia').click();
   if(e.key==='e') document.getElementById('btEspectro').click();
+  if(e.key==='s' && btPartitura.style.display!=='none') btPartitura.click();
 });
 function mudarVoz(passo){
   let i=NIVEIS.findIndex(n=>n.v===vozNivel);
   i=Math.min(NIVEIS.length-1,Math.max(0,i+passo));
   vozNivel=NIVEIS[i].v; montarBotoesVoz(); aplicarVoz();
 }
+
+/* ============ instalar como aplicativo ============
+   Em 127.0.0.1 o Chrome e o Edge oferecem a instalacao sozinhos, desde que
+   haja manifesto, icones e service worker (app/pwa.py grava os tres). O
+   aplicativo instalado continua precisando do festa.bat aberto. */
+let pedidoInstalar=null;
+const btInstalar=document.getElementById('btInstalar');
+const jaInstalado=()=>matchMedia('(display-mode: standalone)').matches
+                      || navigator.standalone===true;
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+}
+addEventListener('beforeinstallprompt',e=>{
+  e.preventDefault(); pedidoInstalar=e;
+  if(!jaInstalado()) btInstalar.style.display='';
+});
+addEventListener('appinstalled',()=>{
+  pedidoInstalar=null; btInstalar.style.display='none';
+  aviso.textContent='App instalado. Abra o festa.bat e depois o atalho "Festa".';
+  setTimeout(()=>{ aviso.textContent=''; },6000);
+});
+btInstalar.onclick=async ()=>{
+  if(!pedidoInstalar) return;
+  pedidoInstalar.prompt();
+  try{ await pedidoInstalar.userChoice; }catch(e){}
+  pedidoInstalar=null; btInstalar.style.display='none';
+};
+
+/* ============ atualizacao pelo GitHub ============
+   O servidor compara a versao instalada (versao.json) com a ultima do GitHub.
+   Se houver nova, aparece o botao; um clique baixa, confere, troca os arquivos
+   do programa (com copia de seguranca) e reinicia o servidor. */
+const btAtualizarApp=document.getElementById('btAtualizarApp');
+const seloVersao=document.getElementById('seloVersao');
+let infoVersao=null, atualizando=false;
+
+async function checarVersao(forcar){
+  try{
+    const r=await fetch('/api/versao'+(forcar?'?forcar=1':''));
+    infoVersao=await r.json();
+  }catch(e){ return null; }
+  const v=infoVersao;
+  seloVersao.textContent = 'v '+(v.local ? v.local.slice(0,7) : 'desconhecida');
+  seloVersao.title = v.local_data ? 'Instalada em '+v.local_data : 'Versao instalada';
+  if(v.novo){
+    btAtualizarApp.style.display='';
+    btAtualizarApp.textContent = v.local ? 'Atualizar app' : 'Sincronizar app';
+    btAtualizarApp.title = (v.mensagem?('Novidade: '+v.mensagem+'\n'):'')
+      + 'Versao '+v.remoto.slice(0,7)+' no GitHub';
+  } else btAtualizarApp.style.display='none';
+  return v;
+}
+
+async function acompanharAtualizacao(){
+  for(;;){
+    await new Promise(r=>setTimeout(r,1000));
+    let j;
+    try{ j=await (await fetch('/api/atualizacao')).json(); }
+    catch(e){ return aguardarReinicio(); }       /* servidor saiu: reiniciando */
+    aviso.textContent='Atualizando: '+(j.texto||j.fase)+(j.frac?' ('+Math.round(j.frac*100)+'%)':'');
+    if(j.erro){ aviso.textContent='Atualizacao falhou: '+j.erro;
+                atualizando=false; checarVersao(true); return; }
+    if(j.fase==='reiniciando') return aguardarReinicio();
+    if(j.fase==='pronto'){ aviso.textContent='Ja esta na versao mais nova.';
+                           atualizando=false; checarVersao(true); return; }
+  }
+}
+async function aguardarReinicio(){
+  aviso.textContent='Reiniciando o servidor...';
+  await new Promise(r=>setTimeout(r,4000));
+  for(let i=0;i<60;i++){
+    try{ const r=await fetch('/api/versao',{cache:'no-store'});
+         if(r.ok){ location.reload(); return; } }catch(e){}
+    await new Promise(r=>setTimeout(r,1000));
+  }
+  aviso.textContent='O servidor nao voltou sozinho. Feche esta janela e abra o festa.bat.';
+  atualizando=false;
+}
+btAtualizarApp.onclick=async ()=>{
+  if(atualizando||!infoVersao||!infoVersao.novo) return;
+  const v=infoVersao;
+  if(!confirm((v.local?'Atualizar o KaraokeSep?':'Sincronizar com a ultima versao do GitHub?')
+      +(v.mensagem?('\n\nNovidade: '+v.mensagem):'')
+      +'\n\nOs arquivos do programa serao trocados (uma copia fica em trabalho/backup) '
+      +'e o servidor reinicia. Suas musicas, modelos e o ambiente nao sao tocados.'
+      +(tocando?'\n\nA musica vai parar.':''))) return;
+  atualizando=true;
+  try{
+    const r=await fetch('/api/atualizar',{method:'POST'});
+    const j=await r.json();
+    if(j.erro){ aviso.textContent=j.erro; atualizando=false; return; }
+  }catch(e){ aviso.textContent='Servidor nao respondeu.'; atualizando=false; return; }
+  acompanharAtualizacao();
+};
+checarVersao(false);
+setInterval(()=>{ if(!atualizando) checarVersao(false); }, 30*60*1000);
+
+/* ============ partitura ============
+   O Colab gera, por faixa, um SVG (Verovio) e um mapa "batida -> notas que
+   soam". Aqui so se le: converte o tempo do audio em batida pela grade de
+   batidas detectada e destaca a nota. Nao ha biblioteca de partitura no
+   navegador. */
+const PART={dados:null, titulo:null, stem:null, svg:null, tok:0,
+            notas:new Map(), qPorId:new Map(), eventos:[], medidas:[],
+            ativos:[], cursorIdx:-2, ok:false, ajuste:0, zoom:100, manualAte:0};
+try{ PART.ajuste=+localStorage.getItem('partAjuste')||0;
+     PART.zoom=+localStorage.getItem('partZoom')||100; }catch(e){}
+const btPartitura=document.getElementById('btPartitura');
+const partFolha=document.getElementById('partFolha');
+const partSvg=document.getElementById('partSvg');
+const partAviso=document.getElementById('partAviso');
+
+function partDoItem(m){
+  if(!m||!m.partitura) return null;
+  return Object.values(m.partitura.stems).some(s=>s.tela) ? m.partitura : null;
+}
+function urlPart(titulo,arq,v){
+  return '/'+[titulo,'partituras',arq].map(encodeURIComponent).join('/')
+         +(v?'?v='+encodeURIComponent(v):'');
+}
+function esc(t){ return String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function avisoPart(txt,ruim){ partAviso.textContent=txt||''; partAviso.className=ruim?'ruim':''; }
+
+function prepararPartitura(m){
+  const p=partDoItem(m);
+  PART.dados=null; PART.stem=null; PART.svg=null; PART.ok=false;
+  PART.cursorIdx=-2; PART.ativos=[]; PART.titulo=m.titulo; PART.tok++;
+  btPartitura.style.display = p ? '' : 'none';
+  if(!p){ fecharPartitura(false); return; }
+  if(document.body.classList.contains('verPartitura')) abrirPartitura();
+}
+
+function fecharPartitura(redimensionarTela){
+  document.body.classList.remove('verPartitura');
+  btPartitura.classList.remove('on');
+  if(redimensionarTela!==false)
+    setTimeout(()=>{ redimensionar(); dimensionarMapa(); desenharMapa(); },120);
+}
+
+async function abrirPartitura(chave){
+  const m=FILA[idx], p=partDoItem(m);
+  if(!p) return;
+  document.body.classList.add('verPartitura');
+  btPartitura.classList.add('on');
+  if(!PART.dados || PART.dados._titulo!==m.titulo){
+    const tok=++PART.tok;
+    try{
+      const r=await fetch('/api/partitura?titulo='+encodeURIComponent(m.titulo));
+      if(!r.ok) throw new Error('sem resposta');
+      const d=await r.json(); d._titulo=m.titulo;
+      if(tok!==PART.tok) return;
+      PART.dados=d;
+    }catch(e){ avisoPart('Nao consegui ler a partitura desta musica.',true); return; }
+  }
+  const chaves=Object.keys(p.stems).filter(k=>p.stems[k].tela);
+  const ordem=['vocal_principal','vocal','voz_masculina','voz_feminina','baixo'];
+  const alvo = (chave&&chaves.includes(chave)) ? chave
+             : (PART.stem&&chaves.includes(PART.stem)) ? PART.stem
+             : (ordem.find(k=>chaves.includes(k))||chaves[0]);
+  mostrarStem(alvo);
+}
+
+function montarChipsPart(p){
+  const cx=document.getElementById('partChips'); cx.innerHTML='';
+  const ordem=['vocal_principal','vocal','voz_masculina','voz_feminina','baixo'];
+  const pos=k=>{ const i=ordem.indexOf(k); return i<0?99:i; };
+  Object.entries(p.stems).filter(([k,s])=>s.tela)
+        .sort((a,b)=>pos(a[0])-pos(b[0])).forEach(([k,s])=>{
+    const b=document.createElement('button');
+    b.className='chip'+(k===PART.stem?' on':''); b.dataset.k=k;
+    b.textContent=s.nome+' · '+Math.round((s.confianca||0)*100)+'%';
+    b.title='Confianca media da transcricao: '+Math.round((s.confianca||0)*100)+'%';
+    b.onclick=()=>mostrarStem(k);
+    cx.appendChild(b);
+  });
+}
+
+function montarBaixarPart(m,p,k){
+  const s=p.stems[k], cx=document.getElementById('partBaixar'); cx.innerHTML='';
+  const rot={pdf:'PDF',musicxml:'MusicXML',mid:'MIDI'};
+  ['pdf','musicxml','mid'].forEach(t=>{
+    if(!s.arquivos[t]) return;
+    const a=document.createElement('a'); a.className='btsep';
+    a.href=urlPart(m.titulo,s.arquivos[t],s.hash);
+    a.download=m.titulo+' - '+s.nome+'.'+(t==='mid'?'mid':t);
+    a.textContent=rot[t]; cx.appendChild(a);
+  });
+  if(Object.values(p.stems).some(x=>x.arquivos.pdf)){
+    const a=document.createElement('a'); a.className='btsep';
+    a.href='/api/partitura_zip?tipo=pdf&titulo='+encodeURIComponent(m.titulo);
+    a.textContent='Todos os PDFs (.zip)'; cx.appendChild(a);
+  }
+}
+
+function injetarSvg(texto){
+  const doc=new DOMParser().parseFromString(texto,'image/svg+xml');
+  const raiz=doc.documentElement;
+  if(!raiz || raiz.nodeName.toLowerCase()!=='svg' || doc.querySelector('parsererror'))
+    throw new Error('SVG invalido');
+  /* o SVG vem do zip do Colab; ainda assim, nada executavel entra na pagina */
+  doc.querySelectorAll('script,foreignObject,iframe,object,embed').forEach(n=>n.remove());
+  doc.querySelectorAll('*').forEach(n=>{
+    [...n.attributes].forEach(a=>{
+      const nome=a.name.toLowerCase();
+      if(nome.startsWith('on') ||
+         ((nome==='href'||nome==='xlink:href') && /^\s*javascript:/i.test(a.value)))
+        n.removeAttribute(a.name);
+    });
+  });
+  const no=document.importNode(raiz,true);
+  const w=parseFloat(no.getAttribute('width')), h=parseFloat(no.getAttribute('height'));
+  if(w&&h&&!no.getAttribute('viewBox')) no.setAttribute('viewBox','0 0 '+w+' '+h);
+  no.removeAttribute('width'); no.removeAttribute('height');
+  no.style.width=PART.zoom+'%'; no.style.height='auto';
+  partSvg.innerHTML=''; partSvg.appendChild(no);
+  return no;
+}
+
+async function mostrarStem(k){
+  const m=FILA[idx], p=partDoItem(m);
+  if(!p||!p.stems[k]) return;
+  const s=p.stems[k], tok=++PART.tok;
+  PART.stem=k; PART.svg=null; PART.ok=false; PART.ativos=[]; PART.cursorIdx=-2;
+  montarChipsPart(p); montarBaixarPart(m,p,k);
+  document.getElementById('partInfo').textContent=
+    [s.tonalidade, s.notas+' notas',
+     p.bpm?('~'+Math.round(p.bpm)+' BPM'):'',
+     (p.compasso||[4,4]).join('/')].filter(Boolean).join(' · ');
+  avisoPart('');
+  partSvg.innerHTML='<div class="partMsg">Carregando partitura...</div>';
+  let texto, tm;
+  try{
+    const [a,b]=await Promise.all([fetch(urlPart(m.titulo,s.arquivos.svg,s.hash)),
+                                   fetch(urlPart(m.titulo,s.arquivos.timemap,s.hash))]);
+    if(!a.ok||!b.ok) throw new Error('arquivo ausente');
+    texto=await a.text(); tm=await b.json();
+  }catch(e){
+    if(tok===PART.tok) partSvg.innerHTML='<div class="partMsg">Partitura indisponivel ('+esc(e.message)+').</div>';
+    return;
+  }
+  if(tok!==PART.tok) return;
+  let no;
+  try{ no=injetarSvg(texto); }
+  catch(e){ partSvg.innerHTML='<div class="partMsg">Partitura ilegivel ('+esc(e.message)+').</div>'; return; }
+
+  PART.svg=no; PART.eventos=tm.eventos||[];
+  PART.notas=new Map(); no.querySelectorAll('g.note').forEach(g=>PART.notas.set(g.id,g));
+  PART.qPorId=new Map();
+  PART.eventos.forEach(ev=>ev[1].forEach(id=>{ if(!PART.qPorId.has(id)) PART.qPorId.set(id,ev[0]); }));
+  let achou=0; PART.qPorId.forEach((q,id)=>{ if(PART.notas.has(id)) achou++; });
+  PART.ok = PART.qPorId.size>0 && achou/PART.qPorId.size>=0.9
+            && Array.isArray(PART.dados.batidas) && PART.dados.batidas.length>=2
+            && (!s.hash||!tm.hash||s.hash===tm.hash);
+  marcarCompassos(k);
+
+  const msgs=[];
+  if(!PART.ok) msgs.push('O desenho e o mapa de tempo nao combinam (arquivos de execucoes '
+     +'diferentes). O cursor ficou desligado; gere a partitura de novo no Colab.');
+  if((s.confianca||0)<0.6) msgs.push('Transcricao aproximada: use como guia e confira de ouvido.');
+  if(/librosa/i.test(p.fonte_batidas||'')) msgs.push('As batidas vieram do rastreador simples '
+     +'(Beat This! indisponivel): o cursor pode se perder em musica com andamento livre.');
+  if(s.aviso) msgs.push(s.aviso);
+  avisoPart(msgs.join(' '), !PART.ok);
+  partFolha.scrollTop=0;
+}
+
+/* compassos em que o que foi escrito nao bate com o que se ouve */
+function marcarCompassos(k){
+  const conf=(PART.dados.stems[k]||{}).confianca_compassos||[];
+  PART.medidas=[...PART.svg.querySelectorAll('g.measure')];
+  const caixas=PART.medidas.map(g=>{ try{ return g.getBBox(); }catch(e){ return null; } });
+  PART.medidas.forEach((g,i)=>{
+    const c=conf[i], b=caixas[i];
+    if(c===null||c===undefined||!b||!b.width) return;
+    if(c>=0.75) return;
+    const r=document.createElementNS('http://www.w3.org/2000/svg','rect');
+    r.setAttribute('x',b.x); r.setAttribute('y',b.y);
+    r.setAttribute('width',b.width); r.setAttribute('height',b.height);
+    r.setAttribute('class', c<0.5?'confBaixa':'confMedia');
+    const t=document.createElementNS('http://www.w3.org/2000/svg','title');
+    t.textContent='Confianca do compasso: '+Math.round(c*100)+'%';
+    r.appendChild(t);
+    g.insertBefore(r,g.firstChild);
+  });
+}
+
+/* tempo do audio <-> indice (fracionario) da batida na partitura */
+function posBatida(t){
+  const B=PART.dados.batidas, n=B.length;
+  if(t<=B[0]) return (t-B[0])/(B[1]-B[0]);
+  if(t>=B[n-1]) return n-1+(t-B[n-1])/(B[n-1]-B[n-2]);
+  let lo=0, hi=n-1;
+  while(hi-lo>1){ const mid=(lo+hi)>>1; if(B[mid]<=t) lo=mid; else hi=mid; }
+  return lo+(t-B[lo])/(B[lo+1]-B[lo]);
+}
+function tempoDaBatida(q){
+  const B=PART.dados.batidas, n=B.length;
+  const i=Math.max(0,Math.min(n-2,Math.floor(q)));
+  return B[i]+(q-i)*(B[i+1]-B[i]);
+}
+/* o cursor mostra o que se OUVE: tira a latencia de saida e soma o ajuste */
+function desvioPart(){
+  const lat=(ctx&&ctx.outputLatency)||0;
+  return -lat+PART.ajuste/1000;
+}
+
+function atualizarPartitura(){
+  if(!PART.svg||!PART.ok||!mestre) return;
+  const q=posBatida(mestre.currentTime+desvioPart())+1e-6;
+  const E=PART.eventos;
+  let lo=-1, hi=E.length;                /* ultimo evento com E[i][0] <= q */
+  while(hi-lo>1){ const mid=(lo+hi)>>1; if(E[mid][0]<=q) lo=mid; else hi=mid; }
+  if(lo===PART.cursorIdx) return;
+  PART.cursorIdx=lo;
+  PART.ativos.forEach(g=>g.classList.remove('tocando'));
+  PART.ativos=[];
+  if(lo>=0) E[lo][1].forEach(id=>{
+    const g=PART.notas.get(id);
+    if(g){ g.classList.add('tocando'); PART.ativos.push(g); }
+  });
+  if(PART.ativos.length) rolarPart(PART.ativos[0]);
+}
+
+function rolarPart(el){
+  if(Date.now()<PART.manualAte) return;   /* a pessoa esta rolando a mao */
+  const fr=partFolha.getBoundingClientRect(), er=el.getBoundingClientRect();
+  const topo=er.top-fr.top, base=er.bottom-fr.top;
+  if(topo<fr.height*0.10 || base>fr.height*0.70)
+    partFolha.scrollTo({top:partFolha.scrollTop+topo-fr.height*0.28, behavior:'smooth'});
+}
+['wheel','touchmove','mousedown'].forEach(ev=>
+  partFolha.addEventListener(ev,()=>{ PART.manualAte=Date.now()+3500; },{passive:true}));
+
+/* a nota mais proxima do clique: acertar a cabeca de uma nota de 1 cm na
+   unha e ruim; vale clicar perto dela, no mesmo sistema */
+function notaPerto(x,y){
+  let melhor=null, dmin=36;
+  PART.notas.forEach((g,id)=>{
+    if(!PART.qPorId.has(id)) return;
+    const r=g.getBoundingClientRect();
+    const dx=Math.max(r.left-x,0,x-r.right), dy=Math.max(r.top-y,0,y-r.bottom);
+    const d=Math.hypot(dx,dy*1.4);
+    if(d<dmin){ dmin=d; melhor=id; }
+  });
+  return melhor;
+}
+partFolha.addEventListener('click',ev=>{
+  if(!PART.svg||!PART.ok) return;
+  let q=null;
+  const g=ev.target.closest?ev.target.closest('g.note'):null;
+  const id=(g&&PART.qPorId.has(g.id))?g.id:notaPerto(ev.clientX,ev.clientY);
+  if(id) q=PART.qPorId.get(id);
+  else{
+    const me=ev.target.closest?ev.target.closest('g.measure'):null;
+    const i=PART.medidas.indexOf(me);
+    if(i>=0) q=i*((PART.dados.compasso||[4])[0]||4);
+  }
+  if(q===null) return;
+  PART.manualAte=0;
+  irPara(Math.max(0,tempoDaBatida(q)-desvioPart()));
+});
+
+const partAjuste=document.getElementById('partAjuste'), partZoom=document.getElementById('partZoom');
+partAjuste.value=PART.ajuste; partZoom.value=PART.zoom;
+document.getElementById('partAjusteV').textContent=PART.ajuste+' ms';
+document.getElementById('partZoomV').textContent=PART.zoom+'%';
+partAjuste.oninput=()=>{
+  PART.ajuste=+partAjuste.value; PART.cursorIdx=-2;
+  document.getElementById('partAjusteV').textContent=PART.ajuste+' ms';
+  try{ localStorage.setItem('partAjuste',PART.ajuste); }catch(e){}
+};
+partZoom.oninput=()=>{
+  PART.zoom=+partZoom.value;
+  document.getElementById('partZoomV').textContent=PART.zoom+'%';
+  if(PART.svg) PART.svg.style.width=PART.zoom+'%';
+  try{ localStorage.setItem('partZoom',PART.zoom); }catch(e){}
+};
+btPartitura.onclick=()=>{
+  if(document.body.classList.contains('verPartitura')) fecharPartitura();
+  else abrirPartitura();
+};
 
 /* laco de sincronia e relogio */
 setInterval(()=>{
