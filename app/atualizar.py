@@ -53,8 +53,9 @@ MANTER_BACKUPS = 3
 
 # Nomes da raiz que nunca sao tocados.
 PROTEGIDOS = {"venv", "saida", "modelos", "trabalho", "bin", "__pycache__",
-              "karaokesep.log", "tempos.json", "versao.json",
-              "atualizacao.json", "github_token.txt"}
+              "karaokesep.log", "tempos.json", "versao.json", "modo_player.txt",
+              "atualizacao.json", "github_token.txt", "instalacao.log",
+              "instalacao_player.log"}
 ESSENCIAIS = ("app/__init__.py", "app/festa.py", "app/atualizar.py",
               "app/util.py", "requirements.txt")
 
@@ -220,9 +221,9 @@ def _extrair(zip_path: Path, destino: Path) -> list[Path]:
     return arquivos
 
 
-def _validar(novo: Path, arquivos: list[Path]) -> None:
+def _validar(novo: Path, arquivos: list[Path], extras: tuple = ()) -> None:
     presentes = {a.as_posix() for a in arquivos}
-    faltam = [e for e in ESSENCIAIS if e not in presentes]
+    faltam = [e for e in (*ESSENCIAIS, *extras) if e not in presentes]
     if faltam:
         raise ErroAtualizacao("a versao baixada esta incompleta: falta "
                               + ", ".join(faltam))
@@ -320,6 +321,13 @@ def _podar_backups(pasta: Path) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def arquivo_requisitos(raiz: Path) -> str:
+    """Instalacao so do player (instalar_player.bat) deixa modo_player.txt e
+    usa a lista curta; a completa puxaria o programa inteiro."""
+    return "requirements-player.txt" if (raiz / "modo_player.txt").exists() \
+        else "requirements.txt"
+
+
 def _hash(arq: Path) -> str:
     try:
         return hashlib.sha256(arq.read_bytes()).hexdigest()
@@ -402,18 +410,19 @@ def _executar(raiz: Path) -> None:
         novo = trabalho / "novo"
         arquivos = _extrair(zip_path, novo)
         _fase("validando")
-        _validar(novo, arquivos)
+        req = arquivo_requisitos(raiz)
+        _validar(novo, arquivos, (req,))
 
         _fase("aplicando")
-        antes_req = _hash(raiz / "requirements.txt")
+        antes_req = _hash(raiz / req)
         rotulo = (local or "sem-versao")[:7] + time.strftime("-%Y%m%d-%H%M%S")
         backup = raiz / "trabalho" / "backup" / rotulo
         n, bats = _aplicar(raiz, novo, arquivos, backup)
 
-        if _hash(raiz / "requirements.txt") != antes_req:
+        if _hash(raiz / req) != antes_req:
             _fase("dependencias", texto="instalando bibliotecas novas (pode demorar)")
             r = subprocess.run([sys.executable, "-m", "pip", "install", "-r",
-                                str(raiz / "requirements.txt")],
+                                str(raiz / req)],
                                capture_output=True, text=True, timeout=1800)
             if r.returncode != 0:
                 # codigo novo sem as bibliotecas dele quebra; volta ao antigo

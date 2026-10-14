@@ -1,0 +1,6 @@
+# So o necessario para TOCAR (festa.bat): sem PyTorch, sem modelos, sem gradio.
+# A separacao das faixas fica no Colab; o zip entra arrastado no modo festa.
+numpy>=1.24
+soundfile>=0.12
+requests>=2.31
+mutagen>=1.47

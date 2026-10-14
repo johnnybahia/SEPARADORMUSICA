@@ -5,6 +5,18 @@ pontuação de canto. Windows, offline, sem mensalidade.
 
 ---
 
+## Só o player (sem separar no PC)
+
+Se a separação roda no Google Colab, o PC só precisa tocar. Dois cliques em
+**`instalar_player.bat`** instalam o necessário em poucos MB (sem PyTorch, sem
+modelos, sem gradio), e o **`festa.bat`** abre o player. Se você já usa o
+`instalar.bat`, não precisa disso.
+
+No player, a aba **Importar** recebe o zip que o Colab baixa: arraste-o sem
+descompactar. Os botões de separar ficam escondidos, porque esse PC não separa.
+A atualização pelo botão **Atualizar app** usa a lista curta
+(`requirements-player.txt`) enquanto existir o arquivo `modo_player.txt`.
+
 ## Começando do zero
 
 1. Instale o **Python 3.12** em
