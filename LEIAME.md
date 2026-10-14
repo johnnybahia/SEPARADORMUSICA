@@ -107,8 +107,87 @@ Sem placa NVIDIA, a separação leva minutos por música. O arquivo
 minuto por música — e usa modelos melhores.
 
 Abra em [colab.research.google.com](https://colab.research.google.com), ligue a
-**T4 GPU** nas configurações, rode as células em ordem e descompacte o zip
-dentro de `saida`.
+**T4 GPU** nas configurações, rode as células em ordem e arraste o zip (que sai com o nome da música) no campo
+**Arraste musicas ou o zip do Colab aqui**, na aba Separar do modo festa. Ele
+descompacta sozinho em `saida`, só aceita áudio, letra e arquivos de partitura, e
+mescla com a música se ela já existir. Descompactar a mão dentro de `saida` também
+funciona.
+
+---
+
+## Partitura da voz e do baixo
+
+**Gerar (no Colab).** No `KaraokeSep_Colab.ipynb`, ligue
+`PARTITURA = "voz_e_baixo"` na primeira célula e rode também a célula
+**Partitura**, logo abaixo. Ela transcreve a voz e o baixo de cada música e baixa o
+zip já com isto dentro de cada pasta:
+
+```
+saida/<música>/partituras/
+    <faixa>.musicxml        a partitura (abre no MuseScore)
+    <faixa>.pdf             para imprimir
+    <faixa>.mid             as notas, com o tempo real do áudio
+    <faixa>.svg             a partitura na tela do modo festa
+    <faixa>.timemap.json    quais notas soam em cada batida
+    partitura.json          batidas, compasso, tonalidade, confiança por compasso
+```
+
+**Ver (no modo festa).** Músicas com partitura ganham o botão **Partitura**
+(tecla `S`) no rodapé, e cada instrumento com partitura ganha um botão no mixer.
+
+- O cursor acompanha o som, destaca a nota e rola a página sozinho.
+- Clique numa nota (ou perto dela) para pular a música até ali.
+- Compassos em **vermelho** ou **amarelo** são os que a transcrição provavelmente
+  errou: o que está escrito não bate com o que se ouve. É alarme, não garantia.
+- **Ajuste** adianta ou atrasa o cursor em relação ao som, em milissegundos. Mexa
+  se o cursor parecer adiantado ou atrasado na sua caixa de som.
+- A linha atual e a próxima da letra aparecem acima da pauta.
+- Botões de **PDF**, **MusicXML** e **MIDI** por faixa, e um zip com todos os PDFs.
+
+O ritmo segue as batidas detectadas na música, não um BPM fixo. Se o Beat This!
+não puder ser baixado, o Colab usa um rastreador mais simples e o player avisa.
+
+Limites desta versão: só voz e baixo, uma nota por vez, sem tercinas. Piano,
+guitarra e bateria ficam para depois. Os limiares de detecção ainda não foram
+calibrados em música real: se a voz sair com notas demais ou de menos, os valores
+ficam em `AJUSTES`, no começo da célula Partitura.
+
+---
+
+## Instalar como aplicativo
+
+Com o modo festa aberto no Chrome ou no Edge, aparece o botão **Instalar app** no
+topo. Ele cria um atalho que abre o modo festa numa janela própria, sem barra de
+endereços. O `festa.bat` continua precisando estar aberto: é ele que serve a
+música. Se a porta 8137 estiver ocupada, o programa usa outra, e o app
+instalado precisa ser reinstalado nela.
+
+---
+
+## Atualizar
+
+O topo mostra a versão instalada. Quando há versão nova no GitHub, aparece o
+botão **Atualizar app**. Um clique:
+
+1. baixa a versão nova e confere se ela está inteira e se todos os arquivos
+   Python compilam, antes de mexer em qualquer coisa;
+2. guarda uma cópia do que vai trocar em `trabalho/backup` (as três últimas);
+3. troca os arquivos do programa; se algo falhar, restaura a cópia;
+4. instala as bibliotecas novas, se o `requirements.txt` mudou;
+5. reinicia o servidor e recarrega a página.
+
+Não são tocados: `venv`, `saida`, `modelos`, `trabalho`, `bin`, o log e o
+`tempos.json`. Os `.bat` também ficam como estão (um `.bat` rodando não pode ser
+trocado com segurança); se algum mudou, o aviso diz qual, e basta baixá-lo do
+GitHub. A atualização não começa enquanto houver separação em andamento.
+
+**Primeira vez.** O botão só existe a partir desta versão. Quem ainda não a tem
+baixa o projeto uma vez à mão (no GitHub, **Code → Download ZIP**) e copia a pasta
+`app` por cima da sua.
+
+**Repositório privado ou outro ramo.** Ponha um token do GitHub com permissão de
+leitura em `github_token.txt`, ao lado do `festa.bat`. Para outro repositório ou
+ramo, crie `atualizacao.json` com `{"repo": "dono/nome", "ramo": "main"}`.
 
 ---
 
