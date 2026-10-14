@@ -1,0 +1,10 @@
+gradio>=4.44,<6
+numpy>=1.24
+soundfile>=0.12
+imageio-ffmpeg>=0.4.9
+requests>=2.31
+mutagen>=1.47
+psutil>=5.9
+# audioread e importado pelo audio_separator mas nao declarado por ele.
+# Vinha de carona com o librosa 0.10; o librosa 0.11 deixou de exigir.
+audioread>=3.0
