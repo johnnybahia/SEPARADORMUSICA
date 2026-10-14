@@ -656,6 +656,109 @@ def receber(nome: str, dados: bytes) -> str:
     return pasta.name
 
 
+# Tipos aceitos ao importar um zip do Colab. Nada executavel entra.
+EXT_ZIP_RAIZ = set(AUDIO_EXT) | {".lrc", ".txt"}
+EXT_ZIP_PARTITURA = {".svg", ".json", ".pdf", ".musicxml", ".mid", ".mxl"}
+LIMITE_ZIP_IMPORT = 4 * 1024 ** 3
+_RUIM = re.compile(r'[<>:"|?*\x00-\x1f]')
+_SVG_PERIGOSO = re.compile(rb"<script|javascript:|\son[a-z]+\s*=|<foreignobject", re.I)
+
+
+def _componente_ok(c: str) -> bool:
+    return bool(c) and c not in (".", "..") and not _RUIM.search(c) \
+        and c == c.strip() and not c.endswith(".")
+
+
+def importar_zip(caminho: Path, nome_zip: str = "") -> list[str]:
+    """Descompacta em saida/ um zip gerado pelo Colab (ou parecido).
+
+    Aceita `Musica/arquivos...` (o normal), `saida/Musica/...` (pasta
+    embrulhando) e arquivos soltos (ai a pasta leva o nome do zip). Mescla com
+    pasta que ja exista: o zip so de partituras completa uma musica ja
+    separada. So entram audio, letra e os arquivos de partitura; caminho
+    fora de saida/ e link simbolico sao recusados.
+    """
+    import stat
+    import zipfile
+    base = PASTA_SAIDA.resolve()
+    with zipfile.ZipFile(caminho) as z:
+        itens = []
+        total = 0
+        for info in z.infolist():
+            if info.is_dir() or stat.S_ISLNK(info.external_attr >> 16):
+                continue
+            partes = info.filename.replace("\\", "/").split("/")
+            if not all(_componente_ok(c) for c in partes):
+                raise ValueError("caminho suspeito no zip: " + info.filename)
+            total += info.file_size
+            if total > LIMITE_ZIP_IMPORT or len(itens) > 20000:
+                raise ValueError("zip grande demais")
+            itens.append((info, partes))
+        if not itens:
+            raise ValueError("zip vazio")
+
+        # tira a pasta que embrulha tudo ("stems/", "saida/"), se houver
+        while all(len(p) >= 2 for _, p in itens) and len({p[0] for _, p in itens}) == 1:
+            raiz = itens[0][1][0]
+            diretos = [p for _, p in itens if len(p) == 2]
+            filhos = {p[1] for _, p in itens}
+            if diretos or "partituras" in filhos:
+                break                   # a pasta e a propria musica
+            itens = [(i, p[1:]) for i, p in itens]
+        # arquivos soltos na raiz: a musica leva o nome do zip
+        soltos = [x for x in itens if len(x[1]) == 1]
+        if soltos:
+            pasta_zip = nome_seguro(Path(nome_zip or "musica").stem, 60)
+            itens = [(i, [pasta_zip, *p]) if len(p) == 1 else (i, p) for i, p in itens]
+
+        pastas, aceitos = set(), 0
+        for info, p in itens:
+            ext = Path(p[-1]).suffix.lower()
+            em_partitura = len(p) >= 3 and p[1] == "partituras"
+            if len(p) == 2 and ext in EXT_ZIP_RAIZ and p[1] != "partituras":
+                pass
+            elif em_partitura and len(p) == 3 and ext in EXT_ZIP_PARTITURA:
+                pass
+            else:
+                continue
+            alvo = (base / Path(*p)).resolve()
+            if base not in alvo.parents:
+                raise ValueError("caminho suspeito no zip: " + info.filename)
+            dados = z.read(info)
+            if ext == ".svg" and _SVG_PERIGOSO.search(dados):
+                continue
+            alvo.parent.mkdir(parents=True, exist_ok=True)
+            alvo.write_bytes(dados)
+            pastas.add(p[0])
+            aceitos += 1
+    if not aceitos:
+        raise ValueError("o zip nao tem audio, letra nem partitura que eu reconheca")
+    return sorted(pastas)
+
+
+def receber_zip(rfile, tamanho: int, nome: str) -> list[str]:
+    """Recebe o zip em disco, aos blocos (um zip do Colab passa de 100 MB e
+    nao cabe bem em memoria), e importa."""
+    from .util import PASTA_TRABALHO
+    PASTA_TRABALHO.mkdir(parents=True, exist_ok=True)
+    tmp = PASTA_TRABALHO / f"upload_{int(time.time() * 1000)}.zip"
+    try:
+        restam = tamanho
+        with open(tmp, "wb") as f:
+            while restam > 0:
+                bloco = rfile.read(min(1 << 20, restam))
+                if not bloco:
+                    raise ValueError("envio interrompido")
+                f.write(bloco)
+                restam -= len(bloco)
+        return importar_zip(tmp, nome)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 # --------------------------------------------------------------------------- #
 #  Servidor local
 # --------------------------------------------------------------------------- #
@@ -827,9 +930,18 @@ class _Manipulador(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if not self._origem_confiavel():
+            self.close_connection = True          # o corpo nao sera lido
             return self._json({"erro": "origem nao permitida"}, 403)
         rota = urllib.parse.urlparse(self.path).path
         tamanho = int(self.headers.get("Content-Length") or 0)
+        nome_env = urllib.parse.unquote(self.headers.get("X-Nome", "audio"))
+        if rota == "/api/enviar" and nome_env.lower().endswith(".zip"):
+            try:
+                return self._json({"ok": True,
+                                   "pastas": receber_zip(self.rfile, tamanho, nome_env)})
+            except Exception as e:
+                log.error("Importar zip: %s", e)
+                return self._json({"erro": str(e)}, 400)
         corpo = self.rfile.read(tamanho) if tamanho else b""
         try:
             if rota == "/api/separar":
@@ -1204,7 +1316,7 @@ PAGINA = r"""<!DOCTYPE html>
       <div id="painelSep">
         <label>Modo de separacao</label>
         <select id="modoSep"></select>
-        <div id="largar">Arraste musicas aqui para acrescentar</div>
+        <div id="largar">Arraste musicas ou o zip do Colab aqui</div>
         <button class="btsep" id="btTodas" style="width:100%;margin-top:9px;padding:8px">
           Separar todas as pendentes</button>
         <button class="btlet" id="btCancelar" style="width:100%;margin-top:6px;padding:7px;
@@ -1931,7 +2043,7 @@ document.getElementById('btSalvarLetra').onclick=async ()=>{
 /* ---------- acrescentar musicas ---------- */
 const largar=document.getElementById('largar');
 const escolher=document.createElement('input');
-escolher.type='file'; escolher.multiple=true; escolher.accept='audio/*';
+escolher.type='file'; escolher.multiple=true; escolher.accept='audio/*,.zip,application/zip';
 escolher.style.display='none'; document.body.appendChild(escolher);
 largar.onclick=()=>escolher.click();
 escolher.onchange=()=>enviarArquivos(escolher.files);
@@ -1946,15 +2058,19 @@ async function enviarArquivos(arquivos){
   if(!lista.length) return;
   for(let i=0;i<lista.length;i++){
     const f=lista[i];
-    largar.textContent='Enviando '+(i+1)+' de '+lista.length+'...';
+    const zip=/\.zip$/i.test(f.name);
+    largar.textContent=(zip?'Importando ':'Enviando ')+(i+1)+' de '+lista.length+'...';
     try{
       const r=await fetch('/api/enviar',{method:'POST',
         headers:{'X-Nome':encodeURIComponent(f.name)}, body:f});
       const j=await r.json();
       if(j.erro) aviso.textContent=f.name+': '+j.erro;
+      else if(zip){ aviso.textContent='Importado: '+j.pastas.join(', ');
+                    setTimeout(()=>{ if(aviso.textContent.startsWith('Importado'))
+                                       aviso.textContent=''; },6000); }
     }catch(e){ aviso.textContent='Falha ao enviar '+f.name; }
   }
-  largar.textContent='Arraste musicas aqui para acrescentar';
+  largar.textContent='Arraste musicas ou o zip do Colab aqui';
   await recarregarFila();
 }
 

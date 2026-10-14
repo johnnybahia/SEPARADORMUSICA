@@ -107,8 +107,11 @@ Sem placa NVIDIA, a separação leva minutos por música. O arquivo
 minuto por música — e usa modelos melhores.
 
 Abra em [colab.research.google.com](https://colab.research.google.com), ligue a
-**T4 GPU** nas configurações, rode as células em ordem e descompacte o zip
-dentro de `saida`.
+**T4 GPU** nas configurações, rode as células em ordem e arraste o zip (que sai com o nome da música) no campo
+**Arraste musicas ou o zip do Colab aqui**, na aba Separar do modo festa. Ele
+descompacta sozinho em `saida`, só aceita áudio, letra e arquivos de partitura, e
+mescla com a música se ela já existir. Descompactar a mão dentro de `saida` também
+funciona.
 
 ---
 
@@ -116,8 +119,8 @@ dentro de `saida`.
 
 **Gerar (no Colab).** No `KaraokeSep_Colab.ipynb`, ligue
 `PARTITURA = "voz_e_baixo"` na primeira célula e rode também a célula
-**Partitura**, logo abaixo. Ela transcreve a voz e o baixo de cada música e baixa
-o `stems.zip` já com isto dentro de cada pasta:
+**Partitura**, logo abaixo. Ela transcreve a voz e o baixo de cada música e baixa o
+zip já com isto dentro de cada pasta:
 
 ```
 saida/<música>/partituras/
