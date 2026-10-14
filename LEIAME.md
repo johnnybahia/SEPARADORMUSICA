@@ -119,11 +119,13 @@ Sem placa NVIDIA, a separação leva minutos por música. O arquivo
 minuto por música — e usa modelos melhores.
 
 Abra em [colab.research.google.com](https://colab.research.google.com), ligue a
-**T4 GPU** nas configurações, rode as células em ordem e arraste o zip (que sai com o nome da música) no campo
-**Arraste musicas ou o zip do Colab aqui**, na aba Separar do modo festa. Ele
-descompacta sozinho em `saida`, só aceita áudio, letra e arquivos de partitura, e
-mescla com a música se ela já existir. Descompactar a mão dentro de `saida` também
-funciona.
+**T4 GPU** nas configurações, rode as células em ordem. O zip sai com o nome da música e traz só as faixas
+(sem pasta por fora). Arraste-o no campo **Arraste musicas ou o zip do Colab aqui**
+(aba Separar, ou Importar no player), ou copie o zip direto para a pasta `saida`:
+em qualquer dos dois casos o player descompacta sozinho, cria a pasta com o nome
+da música e guarda o zip em `trabalho/importados`. Só entram áudio, letra e
+arquivos de partitura; se a música já existir, ele mescla. Sem zip, também dá para
+descompactar a mão numa pasta dentro de `saida`.
 
 ---
 
@@ -222,7 +224,8 @@ ramo, crie `atualizacao.json` com `{"repo": "dono/nome", "ramo": "main"}`.
 **Som metálico ou abafado** — faixa tocando em dobro. Rode `faxina.bat`.
 
 **Faltando instrumento** — olhe a bolinha de cada canal no mixer. Vermelha
-significa que não carregou; clique em Refazer. Se persistir, rode
+significa que não carregou; o aviso no rodapé diz o motivo (formato inválido,
+arquivo não encontrado, rede) e o tamanho que o servidor enxerga. Clique em Refazer. Se persistir, rode
 `diagnostico.bat`.
 
 **O teste que vale:** com todos os faders em 0 dB, a música deve soar igual ao

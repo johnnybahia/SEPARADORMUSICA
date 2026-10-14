@@ -537,6 +537,8 @@ def assinatura() -> str:
                 continue
             st = d.stat()
             partes.append(f"{d.name}:{int(st.st_mtime)}:{len(list(d.iterdir()))}")
+        for z in sorted(PASTA_SAIDA.glob("*.zip")):
+            partes.append(f"zip:{z.name}:{z.stat().st_size}")
         return "|".join(partes)
     except Exception:
         return ""
@@ -593,7 +595,7 @@ def buscar_letra(titulo: str, artista: str = "", nome_musica: str = "") -> dict:
     nome_musica = letras.limpar_titulo(nome_musica or titulo)
     artista = letras.limpar_titulo(artista)
 
-    achado = letras.buscar(nome_musica, artista, "", dur)
+    achado, feitas, erro_rede = letras.buscar_detalhado(nome_musica, artista, "", dur)
     if achado and achado.tem_sincronia:
         letras.salvar_lrc(achado, pasta / "letra.lrc")
         n = len([l for l in achado.sincronizada.splitlines() if l.strip()])
@@ -603,11 +605,20 @@ def buscar_letra(titulo: str, artista: str = "", nome_musica: str = "") -> dict:
         (pasta / "letra_sem_tempo.txt").write_text(achado.simples or "",
                                                    encoding="utf-8")
         return {"ok": False,
-                "motivo": "achei a letra mas sem marcacao de tempo; "
-                          "gravei em letra_sem_tempo.txt"}
+                "motivo": "achei a letra, mas sem marcacao de tempo, entao nao "
+                          "da para acompanhar a musica; gravei em "
+                          "letra_sem_tempo.txt. Se tiver o .lrc, cole abaixo."}
+    if erro_rede:
+        return {"ok": False,
+                "motivo": "nao consegui falar com o LRCLIB (lrclib.net): "
+                          + erro_rede + ". Confira a internet, firewall ou "
+                          "antivirus; o resto do player funciona sem isso.",
+                "tentativas": feitas}
     return {"ok": False,
-            "motivo": "nada encontrado. Confira o nome do artista e da musica, "
-                      "ou cole o LRC na caixa abaixo"}
+            "motivo": "o LRCLIB nao tem letra sincronizada para isso. Corrija o "
+                      "artista e a musica nos campos, ou cole um .lrc abaixo. "
+                      "Tentei: " + "; ".join(feitas),
+            "tentativas": feitas}
 
 
 def salvar_letra(titulo: str, texto: str) -> dict:
@@ -688,6 +699,15 @@ def _componente_ok(c: str) -> bool:
         and c == c.strip() and not c.endswith(".")
 
 
+def _nome_pasta_do_zip(nome_zip: str) -> str:
+    """"Musica (1).zip" (o navegador numera downloads repetidos) -> "Musica".
+    Mantem acento: e o nome que a busca de letra usa."""
+    base = Path(nome_zip or "musica").stem
+    base = re.sub(r"\s*\(\d+\)\s*$", "", base)
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip(" .")
+    return base[:100] or "musica"
+
+
 def importar_zip(caminho: Path, nome_zip: str = "") -> list[str]:
     """Descompacta em saida/ um zip gerado pelo Colab (ou parecido).
 
@@ -724,11 +744,14 @@ def importar_zip(caminho: Path, nome_zip: str = "") -> list[str]:
             if diretos or "partituras" in filhos:
                 break                   # a pasta e a propria musica
             itens = [(i, p[1:]) for i, p in itens]
-        # arquivos soltos na raiz: a musica leva o nome do zip
-        soltos = [x for x in itens if len(x[1]) == 1]
-        if soltos:
-            pasta_zip = nome_seguro(Path(nome_zip or "musica").stem, 60)
-            itens = [(i, [pasta_zip, *p]) if len(p) == 1 else (i, p) for i, p in itens]
+        # audio solto na raiz = zip de UMA musica (o que o Colab entrega): a
+        # pasta da musica leva o nome do zip e tudo entra nela, inclusive a
+        # subpasta partituras/. Arquivo solto que nao e audio (um LEIAME) e
+        # ignorado.
+        if any(len(p) == 1 and Path(p[0]).suffix.lower() in AUDIO_EXT
+               for _, p in itens):
+            pasta_zip = _nome_pasta_do_zip(nome_zip)
+            itens = [(i, [pasta_zip, *p]) for i, p in itens]
 
         pastas, aceitos = set(), 0
         for info, p in itens:
@@ -753,6 +776,54 @@ def importar_zip(caminho: Path, nome_zip: str = "") -> list[str]:
     if not aceitos:
         raise ValueError("o zip nao tem audio, letra nem partitura que eu reconheca")
     return sorted(pastas)
+
+
+_zip_ja_tentado: dict = {}          # (nome, tamanho, mtime) -> mensagem de erro
+_aviso_importacao: dict = {"ok": [], "erro": []}
+
+
+def importar_zips_pendentes() -> dict:
+    """Zip largado direto em saida/ (a pessoa copiou o arquivo do Colab para
+    la) entra sozinho: e importado e o zip vai para trabalho/importados.
+    Zip ainda sendo copiado (mexido ha menos de 4 s) fica para a proxima."""
+    from .util import PASTA_TRABALHO
+    novos_ok, novos_erro = [], []
+    try:
+        zips = sorted(p for p in PASTA_SAIDA.iterdir()
+                      if p.is_file() and p.suffix.lower() == ".zip")
+    except OSError:
+        zips = []
+    for z in zips:
+        try:
+            st = z.stat()
+        except OSError:
+            continue
+        if time.time() - st.st_mtime < 4:
+            continue
+        chave = (z.name, st.st_size, int(st.st_mtime))
+        if chave in _zip_ja_tentado:
+            continue
+        try:
+            pastas = importar_zip(z, z.name)
+        except Exception as e:
+            _zip_ja_tentado[chave] = str(e)
+            novos_erro.append(f"{z.name}: {e}")
+            log.warning("Zip em saida/ nao importado (%s): %s", z.name, e)
+            continue
+        destino = PASTA_TRABALHO / "importados"
+        destino.mkdir(parents=True, exist_ok=True)
+        try:
+            alvo = destino / z.name
+            if alvo.exists():
+                alvo = destino / f"{int(time.time())}_{z.name}"
+            shutil.move(str(z), str(alvo))
+        except OSError as e:
+            _zip_ja_tentado[chave] = "importado, mas nao consegui mover o zip: %s" % e
+        novos_ok.extend(pastas)
+    if novos_ok or novos_erro:
+        _aviso_importacao["ok"] = novos_ok
+        _aviso_importacao["erro"] = novos_erro
+    return {"ok": novos_ok, "erro": novos_erro}
 
 
 def receber_zip(rfile, tamanho: int, nome: str) -> list[str]:
@@ -883,8 +954,11 @@ class _Manipulador(http.server.SimpleHTTPRequestHandler):
         rota = urllib.parse.urlparse(self.path).path
         try:
             if rota == "/api/fila":
+                imp = importar_zips_pendentes()
                 return self._json({"fila": varrer(), "modos": _modos_com_tempo(),
-                                   "separador": separacao_disponivel()})
+                                   "separador": separacao_disponivel(),
+                                   "importado": imp["ok"],
+                                   "importacao_erros": imp["erro"]})
             if rota == "/api/estado":
                 return self._json(estado())
             if rota.startswith("/api/nomes"):
@@ -1024,6 +1098,10 @@ def endereco() -> str:
 
 
 def gerar(destino: Path | None = None) -> tuple[Path, list[dict]]:
+    try:
+        importar_zips_pendentes()
+    except Exception as e:
+        log.warning("Importacao de zips pendentes falhou: %s", e)
     fila = varrer()
     destino = destino or (PASTA_SAIDA / "festa.html")
     try:
@@ -1656,15 +1734,35 @@ function marcarCanal(i, estado){
   d.classList.add(estado);
 }
 
+/* Diz POR QUE a faixa nao carregou, em vez de so "nao carregou": o codigo de
+   erro do navegador e o que o servidor responde para aquele arquivo. */
+async function diagnosticarFaixa(el){
+  const cod=el.error?el.error.code:0;
+  const rotulos={1:'carregamento cancelado',2:'erro de rede',
+                 3:'nao consegui decodificar o audio',
+                 4:'formato nao suportado ou arquivo invalido'};
+  let http='';
+  try{
+    const r=await fetch(el.src,{method:'HEAD',cache:'no-store'});
+    const mb=Math.round((+r.headers.get('content-length')||0)/1048576*10)/10;
+    http='servidor: '+r.status+(r.ok?'':' arquivo nao encontrado')
+        +', '+(r.headers.get('content-type')||'sem tipo')+', '+mb+' MB';
+  }catch(e){ http='servidor nao respondeu'; }
+  return (rotulos[cod]||'tempo esgotado')+'; '+http;
+}
+
 function carregarFaixa(o, i){
   return new Promise(resolve=>{
     const el=o.el;
     let fim=false;
     const pronto=()=>{ if(fim) return; fim=true;
                        marcarCanal(i,'pronto'); resolve(true); };
-    const falhou=()=>{ if(fim) return; fim=true;
+    const falhou=async ()=>{ if(fim) return; fim=true;
                        marcarCanal(i,'falhou'); o.falhou=true;
-                       naoCarregaram.push(o.dados.arquivo); resolve(false); };
+                       const motivo=await diagnosticarFaixa(el);
+                       console.warn('Faixa nao carregou:', o.dados.arquivo, motivo);
+                       naoCarregaram.push(o.dados.arquivo+' ['+motivo+']');
+                       resolve(false); };
     marcarCanal(i,'carregando');
     el.addEventListener('loadedmetadata', pronto, {once:true});
     el.addEventListener('error', ()=>{
@@ -1674,7 +1772,7 @@ function carregarFaixa(o, i){
       else falhou();
     });
     setTimeout(()=>{ if(!fim && el.readyState>=1) pronto();
-                     else if(!fim) falhou(); }, 20000);
+                     else if(!fim) falhou(); }, 45000);
     el.preload='metadata';
     el.load();
   });
@@ -2113,6 +2211,13 @@ async function enviarArquivos(arquivos){
 async function recarregarFila(){
   try{
     const r=await fetch('/api/fila'); const j=await r.json();
+    if(j.importado && j.importado.length){
+      aviso.textContent='Importado: '+j.importado.join(', ');
+      setTimeout(()=>{ if(aviso.textContent.startsWith('Importado'))
+                         aviso.textContent=''; },6000);
+    }
+    if(j.importacao_erros && j.importacao_erros.length)
+      aviso.textContent='Zip nao importado: '+j.importacao_erros.join(' | ');
     const antes=idx>=0?FILA[idx].titulo:null;
     FILA=j.fila;
     if(antes){ const novo=FILA.findIndex(m=>m.titulo===antes);
