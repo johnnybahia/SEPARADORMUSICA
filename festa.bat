@@ -4,7 +4,8 @@ cd /d "%~dp0"
 title KaraokeSep - modo festa
 
 if not exist "venv\Scripts\python.exe" (
-  echo Ambiente nao encontrado. Rode instalar.bat primeiro.
+  echo Ambiente nao encontrado. Rode instalar_player.bat ^(so tocar^)
+  echo ou instalar.bat ^(programa completo^) primeiro.
   pause
   exit /b 1
 )

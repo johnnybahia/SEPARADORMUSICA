@@ -79,6 +79,17 @@ def _e_derivado(haste: str) -> bool:
     return any(h.startswith(x) or h.endswith(x) for x in DERIVADOS)
 
 
+def separacao_disponivel() -> bool:
+    """O motor de separacao (audio-separator, que puxa o PyTorch) so existe na
+    instalacao completa. Na do player ele falta, e a pagina esconde os botoes
+    de separar: quem separa e o Colab, e o zip entra arrastado na pagina."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec("audio_separator") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _modos_com_tempo() -> list[dict]:
     """Estimativa por modo, usando o que ja foi medido nesta maquina.
 
@@ -447,7 +458,13 @@ def _garantir_trabalhador():
         _trabalhador.start()
 
 
+SEM_SEPARADOR = ("Este PC so toca (instalacao do player). Separe as faixas no "
+                 "Colab e arraste o zip na aba Separar.")
+
+
 def enfileirar(titulo: str, modo: str, tipo: str = "separar") -> dict:
+    if not separacao_disponivel():
+        return {"erro": SEM_SEPARADOR}
     if tipo == "separar" and modo not in {m["id"] for m in MODOS}:
         raise ValueError("modo desconhecido")
     pasta = PASTA_SAIDA / titulo
@@ -471,6 +488,8 @@ def enfileirar_todas(modo: str) -> dict:
     seria mais lento que rodar em fila: elas brigariam pelo mesmo processador
     e ainda dobrariam o uso de memoria.
     """
+    if not separacao_disponivel():
+        return {"erro": SEM_SEPARADOR}
     pendentes = [m["titulo"] for m in varrer() if not m["temFaixas"]]
     postas = []
     for titulo in pendentes:
@@ -864,7 +883,8 @@ class _Manipulador(http.server.SimpleHTTPRequestHandler):
         rota = urllib.parse.urlparse(self.path).path
         try:
             if rota == "/api/fila":
-                return self._json({"fila": varrer(), "modos": _modos_com_tempo()})
+                return self._json({"fila": varrer(), "modos": _modos_com_tempo(),
+                                   "separador": separacao_disponivel()})
             if rota == "/api/estado":
                 return self._json(estado())
             if rota.startswith("/api/nomes"):
@@ -1014,7 +1034,8 @@ def gerar(destino: Path | None = None) -> tuple[Path, list[dict]]:
     destino.write_text(
         PAGINA.replace("__FILA__", json.dumps(fila, ensure_ascii=False))
               .replace("__MODOS__", json.dumps(_modos_com_tempo(),
-                                               ensure_ascii=False)),
+                                               ensure_ascii=False))
+              .replace("__SEPARADOR__", "true" if separacao_disponivel() else "false"),
         encoding="utf-8")
     return destino, fila
 
@@ -1239,6 +1260,8 @@ PAGINA = r"""<!DOCTYPE html>
   body.cheia #letra p{font-size:30px}
   body.cheia #letra p.atual{font-size:46px}
 
+  body.semSeparador .soSeparador{display:none !important}
+
   /* ---- partitura ---- */
   #partitura{display:none;flex:1;flex-direction:column;min-height:0;gap:8px}
   body.verPartitura #partitura{display:flex}
@@ -1314,16 +1337,20 @@ PAGINA = r"""<!DOCTYPE html>
 
     <div class="painel" id="painel-separar" hidden>
       <div id="painelSep">
-        <label>Modo de separacao</label>
-        <select id="modoSep"></select>
+        <div class="detalhe" id="avisoSemSep" style="display:none;margin-bottom:10px">
+          Este PC so toca. Separe as faixas no Colab
+          (KaraokeSep_Colab.ipynb) e arraste o zip que ele baixar no campo abaixo,
+          sem descompactar.</div>
+        <label class="soSeparador">Modo de separacao</label>
+        <select id="modoSep" class="soSeparador"></select>
         <div id="largar">Arraste musicas ou o zip do Colab aqui</div>
-        <button class="btsep" id="btTodas" style="width:100%;margin-top:9px;padding:8px">
+        <button class="btsep soSeparador" id="btTodas" style="width:100%;margin-top:9px;padding:8px">
           Separar todas as pendentes</button>
-        <button class="btlet" id="btCancelar" style="width:100%;margin-top:6px;padding:7px;
+        <button class="btlet soSeparador" id="btCancelar" style="width:100%;margin-top:6px;padding:7px;
           display:none">Cancelar a fila</button>
-        <div class="detalhe" id="avisoModo" style="margin-top:7px"></div>
-        <div class="detalhe" id="pendentes" style="margin-top:5px"></div>
-        <div id="progresso">
+        <div class="detalhe soSeparador" id="avisoModo" style="margin-top:7px"></div>
+        <div class="detalhe soSeparador" id="pendentes" style="margin-top:5px"></div>
+        <div id="progresso" class="soSeparador">
           <div class="nome" id="sepNome"></div>
           <div class="trilho"><i id="sepBarra"></i></div>
           <div class="detalhe" id="sepDetalhe"></div>
@@ -1566,6 +1593,7 @@ PAGINA = r"""<!DOCTYPE html>
 <script>
 let FILA = __FILA__;
 const MODOS = __MODOS__;
+const SEPARADOR = __SEPARADOR__;
 
 /* A pagina PRECISA ser servida por http. Aberta por file://, o navegador
    trata cada arquivo como origem isolada e o Web Audio devolve silencio
@@ -1827,9 +1855,10 @@ function montarFila(){
     d.className='item'+(i===idx?' ativo':''); d.dataset.i=i;
     let html=m.titulo+'<small>'+(m.temFaixas
       ? m.canais.length+' faixas'+(m.letra.length?' · letra':'')
-      : 'sem faixas · cancelamento ao vivo')+'</small>';
+      : (SEPARADOR?'sem faixas · cancelamento ao vivo'
+                  :'sem faixas · separe no Colab'))+'</small>';
     let acoes='';
-    if(!m.temFaixas)
+    if(SEPARADOR && !m.temFaixas)
       acoes+='<button class="btsep" data-sep="'
             +encodeURIComponent(m.titulo)+'">Separar faixas</button>';
     if(!m.letra.length)
@@ -1837,7 +1866,7 @@ function montarFila(){
             +encodeURIComponent(m.titulo)+'">Buscar letra</button>';
     const temVoz=m.canais.some(c=>c.chave==='vocal'||c.chave==='vocal_principal');
     const jaDividiu=m.canais.some(c=>c.chave==='voz_masculina'||c.chave==='voz_feminina');
-    if(temVoz && !jaDividiu)
+    if(SEPARADOR && temVoz && !jaDividiu)
       acoes+='<button class="btvoz" data-voz="'
             +encodeURIComponent(m.titulo)+'">Separar vozes</button>';
     if(acoes) html+='<div class="sep">'+acoes+'</div>';
@@ -1895,6 +1924,12 @@ function montarFila(){
 
 /* ---------- separar em lote ---------- */
 let SEP={atual:null,espera:[]};
+if(!SEPARADOR){
+  document.body.classList.add('semSeparador');
+  document.getElementById('avisoSemSep').style.display='block';
+  const abaSep=document.querySelector('.aba[data-aba="separar"]');
+  if(abaSep) abaSep.firstChild.textContent='Importar';
+}
 
 function contarPendentes(){
   const n=FILA.filter(m=>!m.temFaixas).length;
